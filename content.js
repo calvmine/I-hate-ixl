@@ -29,7 +29,9 @@ function solveCurrentProblem() {
     // Wait for problem to fully load
     const problemContainer = document.querySelector('[data-test-id="problem"]') || 
                             document.querySelector('.problem-content') ||
-                            document.querySelector('[role="main"]');
+                            document.querySelector('[role="main"]') ||
+                            document.querySelector('main') ||
+                            document.body;
     
     if (!problemContainer) {
       setTimeout(solveCurrentProblem, 500);
@@ -40,7 +42,7 @@ function solveCurrentProblem() {
     const problemText = extractProblemText(problemContainer);
     console.log('IXL Problem:', problemText);
 
-    if (!problemText) {
+    if (!problemText || problemText.length < 2) {
       setTimeout(solveCurrentProblem, 500);
       return;
     }
@@ -56,7 +58,7 @@ function solveCurrentProblem() {
       
       if (soundEnabled) playSuccessSound();
     } else {
-      console.log('Could not solve problem');
+      console.log('Could not solve problem, retrying...');
       setTimeout(solveCurrentProblem, 1000);
     }
   } catch (error) {
@@ -73,7 +75,8 @@ function extractProblemText(container) {
     '.problem-statement',
     '.problem-text',
     '[role="main"] p',
-    '.question-text'
+    '.question-text',
+    '.problem-description'
   ];
 
   let text = '';
@@ -81,16 +84,23 @@ function extractProblemText(container) {
     const el = container.querySelector(selector);
     if (el) {
       text = el.textContent.trim();
-      break;
+      if (text.length > 5) break;
     }
   }
 
-  // If no text found, get all text from container
-  if (!text) {
-    text = container.textContent.trim();
+  // If no text found, get all visible text from container
+  if (!text || text.length < 5) {
+    const paragraphs = container.querySelectorAll('p, span, div');
+    for (const p of paragraphs) {
+      const pText = p.textContent.trim();
+      if (pText.length > 5 && pText.length < 500 && !pText.includes('Sign out')) {
+        text = pText;
+        break;
+      }
+    }
   }
 
-  return text;
+  return text.substring(0, 1000); // Limit to 1000 chars
 }
 
 // Submit answer to IXL
@@ -102,15 +112,20 @@ function submitAnswer(answer) {
     'input.answer-input',
     '[data-test-id="answer-input"]',
     'input[placeholder*="answer" i]',
-    'textarea.answer-input'
+    'textarea.answer-input',
+    'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])'
   ];
 
   let inputField = null;
   for (const selector of inputSelectors) {
-    inputField = document.querySelector(selector);
-    if (inputField && inputField.offsetParent !== null) { // visible
-      break;
+    const fields = document.querySelectorAll(selector);
+    for (const field of fields) {
+      if (field.offsetParent !== null && field.offsetParent !== undefined) { // visible
+        inputField = field;
+        break;
+      }
     }
+    if (inputField) break;
   }
 
   if (inputField) {
@@ -179,25 +194,13 @@ function handleAlternativeInputs(answer) {
 
 // Find submit button
 function findSubmitButton() {
-  const selectors = [
-    'button:contains("Submit")',
-    'button[type="submit"]',
-    '.submit-btn',
-    '[data-test-id="submit-button"]',
-    'button[aria-label*="submit" i]'
-  ];
-
-  for (const selector of selectors) {
-    if (selector.includes(':contains')) {
-      const buttons = document.querySelectorAll('button');
-      for (const btn of buttons) {
-        if (btn.textContent.includes('Submit') && btn.offsetParent !== null) {
-          return btn;
-        }
-      }
-    } else {
-      const btn = document.querySelector(selector);
-      if (btn && btn.offsetParent !== null) return btn;
+  const buttons = document.querySelectorAll('button');
+  
+  for (const btn of buttons) {
+    const text = btn.textContent.toLowerCase();
+    if ((text.includes('submit') || text.includes('check') || text.includes('next')) && 
+        btn.offsetParent !== null) {
+      return btn;
     }
   }
 
@@ -243,13 +246,31 @@ if (document.readyState === 'loading') {
   solveCurrentProblem();
 }
 
-// Also watch for new problems appearing (problem changed)
-const observer = new MutationObserver(() => {
-  solveCurrentProblem();
-});
+// Watch for new problems appearing (problem changed)
+// Only observe if document.body exists
+if (document.body) {
+  const observer = new MutationObserver(() => {
+    solveCurrentProblem();
+  });
 
-observer.observe(document.body, {
-  childList: true,
-  subtree: true,
-  characterData: false
-});
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: false
+  });
+} else {
+  // Wait for body to exist
+  document.addEventListener('DOMContentLoaded', () => {
+    if (document.body) {
+      const observer = new MutationObserver(() => {
+        solveCurrentProblem();
+      });
+
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: false
+      });
+    }
+  });
+}
