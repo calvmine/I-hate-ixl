@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <rect width="48" height="48" fill="#667eea" rx="8"/>
+  <text x="24" y="36" font-size="28" font-weight="bold" fill="white" text-anchor="middle">IXL</text>
+  <circle cx="38" cy="10" r="6" fill="#4caf50"/>
+</svg>
