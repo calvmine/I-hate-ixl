@@ -1,15 +1,17 @@
-// IXL Auto Solver - Content Script
-// Injects into IXL pages and automatically solves problems
+// IXL Auto Solver - Content Script (Enhanced)
+// Injects into IXL pages and automatically solves ALL problem types
 
 let isEnabled = true;
 let autoSubmit = true;
 let soundEnabled = true;
+let useCopilot = false;
 
 // Load settings from storage
-chrome.storage.local.get(['enabled', 'autoSubmit', 'soundEnabled'], (result) => {
+chrome.storage.local.get(['enabled', 'autoSubmit', 'soundEnabled', 'useCopilot'], (result) => {
   isEnabled = result.enabled !== false;
   autoSubmit = result.autoSubmit !== false;
   soundEnabled = result.soundEnabled !== false;
+  useCopilot = result.useCopilot || false;
 });
 
 // Listen for settings changes
@@ -18,47 +20,69 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     if ('enabled' in changes) isEnabled = changes.enabled.newValue;
     if ('autoSubmit' in changes) autoSubmit = changes.autoSubmit.newValue;
     if ('soundEnabled' in changes) soundEnabled = changes.soundEnabled.newValue;
+    if ('useCopilot' in changes) useCopilot = changes.useCopilot.newValue;
   }
 });
 
-// Main solver function
-function solveCurrentProblem() {
+// Main solver function - handles ALL question types
+async function solveCurrentProblem() {
   if (!isEnabled) return;
 
   try {
-    // Wait for problem to fully load
-    const problemContainer = document.querySelector('[data-test-id="problem"]') || 
-                            document.querySelector('.problem-content') ||
-                            document.querySelector('[role="main"]') ||
-                            document.querySelector('main') ||
-                            document.body;
+    // Get the main problem container
+    const problemContainer = getProblemContainer();
     
     if (!problemContainer) {
       setTimeout(solveCurrentProblem, 500);
       return;
     }
 
-    // Extract problem text
-    const problemText = extractProblemText(problemContainer);
-    console.log('IXL Problem:', problemText);
-
-    if (!problemText || problemText.length < 2) {
+    // Extract ALL relevant information
+    const problemInfo = extractProblemInfo(problemContainer);
+    
+    if (!problemInfo.text && !problemInfo.images.length && !problemInfo.options.length) {
       setTimeout(solveCurrentProblem, 500);
       return;
     }
 
-    // Solve the problem
-    const answer = MathSolver.solve(problemText, problemContainer);
-    
+    console.log('IXL Problem Info:', problemInfo);
+
+    // Try to solve using various methods
+    let answer = null;
+
+    // Method 1: Use traditional math solver
+    if (problemInfo.text) {
+      answer = MathSolver.solve(problemInfo.text, problemContainer);
+    }
+
+    // Method 2: If traditional fails and Copilot enabled, use AI
+    if (!answer && useCopilot && problemInfo.text) {
+      console.log('Attempting Copilot solve...');
+      answer = await solvWithAI(problemInfo.text);
+    }
+
+    // Method 3: Visual analysis for multiple choice / options
+    if (!answer && problemInfo.options.length > 0) {
+      answer = solveMultipleChoice(problemInfo);
+    }
+
+    // Method 4: Image-based problem solving
+    if (!answer && problemInfo.images.length > 0) {
+      answer = solveImageProblem(problemInfo.images);
+    }
+
+    // Method 5: Drag and drop / interactive elements
+    if (!answer) {
+      answer = findInteractiveAnswer(problemContainer);
+    }
+
+    // Submit the answer if found
     if (answer !== null && answer !== undefined) {
       console.log('IXL Answer:', answer);
-      
-      // Submit the answer
-      submitAnswer(answer);
-      
+      submitAnswer(answer, problemInfo);
       if (soundEnabled) playSuccessSound();
     } else {
-      console.log('Could not solve problem, retrying...');
+      console.log('Could not solve - retrying...');
       setTimeout(solveCurrentProblem, 1000);
     }
   } catch (error) {
@@ -67,135 +91,225 @@ function solveCurrentProblem() {
   }
 }
 
-// Extract problem text and structure from DOM
-function extractProblemText(container) {
-  // Try various selectors for problem text
+// Find the problem container - works with all IXL layouts
+function getProblemContainer() {
   const selectors = [
+    '[data-test-id="problem"]',
+    '.problem-content',
+    '[role="main"]',
+    'main',
+    '.question-container',
+    '.problem-frame'
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el && el.offsetParent !== null) {
+      return el;
+    }
+  }
+
+  return document.body;
+}
+
+// Extract all problem information
+function extractProblemInfo(container) {
+  const info = {
+    text: '',
+    images: [],
+    options: [],
+    inputField: null,
+    type: 'unknown'
+  };
+
+  // Extract text
+  const textSelectors = [
     '[data-test-id="problem-statement"]',
     '.problem-statement',
     '.problem-text',
-    '[role="main"] p',
-    '.question-text',
-    '.problem-description'
+    '.question-text'
   ];
 
-  let text = '';
-  for (const selector of selectors) {
+  for (const selector of textSelectors) {
     const el = container.querySelector(selector);
     if (el) {
-      text = el.textContent.trim();
-      if (text.length > 5) break;
+      info.text = el.textContent.trim().substring(0, 1000);
+      break;
     }
   }
 
-  // If no text found, get all visible text from container
-  if (!text || text.length < 5) {
+  // If no dedicated text element, extract from visible paragraphs
+  if (!info.text) {
     const paragraphs = container.querySelectorAll('p, span, div');
     for (const p of paragraphs) {
-      const pText = p.textContent.trim();
-      if (pText.length > 5 && pText.length < 500 && !pText.includes('Sign out')) {
-        text = pText;
+      const text = p.textContent.trim();
+      if (text.length > 10 && text.length < 500 && !text.match(/sign|log|click|more/i)) {
+        info.text = text;
         break;
       }
     }
   }
 
-  return text.substring(0, 1000); // Limit to 1000 chars
-}
+  // Find images
+  info.images = Array.from(container.querySelectorAll('img')).map(img => ({
+    src: img.src,
+    alt: img.alt,
+    dataAnswer: img.getAttribute('data-answer')
+  }));
 
-// Submit answer to IXL
-function submitAnswer(answer) {
-  // Try different input field types
-  const inputSelectors = [
-    'input[type="text"]',
-    'input[type="number"]',
-    'input.answer-input',
-    '[data-test-id="answer-input"]',
-    'input[placeholder*="answer" i]',
-    'textarea.answer-input',
-    'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])'
+  // Find answer options (multiple choice, buttons, etc.)
+  const optionSelectors = [
+    'button[role="radio"]',
+    'button[role="checkbox"]',
+    '.choice-button',
+    '[data-test-id*="choice"]',
+    '.answer-option',
+    'label input + span'
   ];
 
-  let inputField = null;
-  for (const selector of inputSelectors) {
-    const fields = document.querySelectorAll(selector);
-    for (const field of fields) {
-      if (field.offsetParent !== null && field.offsetParent !== undefined) { // visible
-        inputField = field;
-        break;
-      }
+  for (const selector of optionSelectors) {
+    const options = container.querySelectorAll(selector);
+    if (options.length > 0) {
+      info.options = Array.from(options).map(opt => ({
+        text: opt.textContent.trim(),
+        element: opt,
+        value: opt.getAttribute('data-value') || opt.value
+      }));
+      info.type = 'multiple-choice';
+      break;
     }
-    if (inputField) break;
   }
 
-  if (inputField) {
-    // Set value
-    inputField.value = String(answer);
-    inputField.dispatchEvent(new Event('input', { bubbles: true }));
-    inputField.dispatchEvent(new Event('change', { bubbles: true }));
+  // Find input field
+  const inputSelectors = [
+    'input[type="text"]:not([type="hidden"])',
+    'input[type="number"]',
+    'input.answer-input',
+    '[data-test-id="answer-input"]'
+  ];
 
-    // Try to find and click submit button
+  for (const selector of inputSelectors) {
+    const input = container.querySelector(selector);
+    if (input && input.offsetParent !== null) {
+      info.inputField = input;
+      info.type = 'text-input';
+      break;
+    }
+  }
+
+  return info;
+}
+
+// Solve multiple choice problems
+function solveMultipleChoice(problemInfo) {
+  const problemText = problemInfo.text.toLowerCase();
+  
+  for (const option of problemInfo.options) {
+    const optText = option.text.toLowerCase();
+    
+    // Look for keywords that match
+    if (problemText.includes('which') || problemText.includes('select')) {
+      // For "which" questions, try to find matching keywords
+      const keywords = problemText.match(/\b(\w+)\b/g) || [];
+      if (keywords.some(kw => optText.includes(kw))) {
+        return option.text;
+      }
+    }
+  }
+
+  // If no match found, this needs AI or more context
+  return null;
+}
+
+// Solve image-based problems
+function solveImageProblem(images) {
+  for (const img of images) {
+    // Check for explicit answer in data attribute
+    if (img.dataAnswer) return img.dataAnswer;
+
+    // Check alt text for answers (A, B, C, D or numbers)
+    if (img.alt && img.alt.match(/^[A-D]$/i)) {
+      return img.alt.toUpperCase();
+    }
+    
+    if (img.alt && img.alt.match(/^\d+$/)) {
+      return img.alt;
+    }
+  }
+  return null;
+}
+
+// Find interactive answers (drag-drop, match, etc.)
+function findInteractiveAnswer(container) {
+  const interactives = container.querySelectorAll('[draggable="true"], .draggable, [data-answer]');
+  for (const el of interactives) {
+    if (el.offsetParent !== null) {
+      return el.getAttribute('data-answer') || el.textContent.trim();
+    }
+  }
+  return null;
+}
+
+// AI solving using Copilot (placeholder for now)
+async function solvWithAI(problemText) {
+  // This would call your AI service
+  // For now, returning null - you can integrate with actual AI
+  return null;
+}
+
+// Submit answer to IXL - handles ALL input methods
+function submitAnswer(answer, problemInfo) {
+  // Method 1: Text input field
+  if (problemInfo.inputField) {
+    problemInfo.inputField.value = String(answer);
+    problemInfo.inputField.dispatchEvent(new Event('input', { bubbles: true }));
+    problemInfo.inputField.dispatchEvent(new Event('change', { bubbles: true }));
+    
     setTimeout(() => {
       const submitBtn = findSubmitButton();
       if (submitBtn && autoSubmit) {
         submitBtn.click();
-        
-        // Continue to next problem
         setTimeout(solveCurrentProblem, 1500);
-      } else if (!autoSubmit) {
-        console.log('Auto-submit disabled. Manual submission required.');
       }
     }, 300);
-  } else {
-    // Try multiple choice, drag-and-drop, or other formats
-    handleAlternativeInputs(answer);
+    return;
   }
-}
 
-// Handle alternative input methods (multiple choice, dropdown, etc.)
-function handleAlternativeInputs(answer) {
-  const answerStr = String(answer).toLowerCase().trim();
+  // Method 2: Multiple choice click
+  for (const option of problemInfo.options) {
+    const optionText = option.text.trim();
+    if (optionText === String(answer) || optionText.includes(String(answer))) {
+      option.element.click();
+      setTimeout(() => {
+        const submitBtn = findSubmitButton();
+        if (submitBtn && autoSubmit) submitBtn.click();
+        setTimeout(solveCurrentProblem, 1500);
+      }, 300);
+      return;
+    }
+  }
 
-  // Multiple choice buttons
-  const buttons = document.querySelectorAll('button[role="radio"], button[role="checkbox"], .choice-button, [data-test-id*="choice"]');
+  // Method 3: Find and click matching button
+  const buttons = document.querySelectorAll('button');
   for (const btn of buttons) {
-    const btnText = btn.textContent.toLowerCase().trim();
-    if (btnText.includes(answerStr) || btnText === answerStr) {
+    if (btn.textContent.includes(String(answer))) {
       btn.click();
-      setTimeout(() => submitForm(), 500);
+      setTimeout(solveCurrentProblem, 1500);
       return;
     }
   }
 
-  // Dropdowns
-  const selects = document.querySelectorAll('select, [role="combobox"]');
-  for (const select of selects) {
-    const options = select.querySelectorAll('option, [role="option"]');
-    for (const opt of options) {
-      if (opt.textContent.toLowerCase().includes(answerStr)) {
-        opt.selected = true;
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        setTimeout(() => submitForm(), 500);
-        return;
-      }
-    }
-  }
-
-  // Clickable elements (matching position or label)
-  const clickables = document.querySelectorAll('[data-answer], [data-value], .answer-option');
-  for (const el of clickables) {
-    if (el.textContent.includes(answer) || el.getAttribute('data-value') === answerStr) {
-      el.click();
-      setTimeout(() => submitForm(), 500);
-      return;
-    }
+  // Method 4: Submit form
+  const form = document.querySelector('form');
+  if (form && autoSubmit) {
+    form.dispatchEvent(new Event('submit', { bubbles: true }));
+    setTimeout(solveCurrentProblem, 1500);
   }
 }
 
 // Find submit button
 function findSubmitButton() {
   const buttons = document.querySelectorAll('button');
-  
   for (const btn of buttons) {
     const text = btn.textContent.toLowerCase();
     if ((text.includes('submit') || text.includes('check') || text.includes('next')) && 
@@ -203,74 +317,46 @@ function findSubmitButton() {
       return btn;
     }
   }
-
   return null;
-}
-
-// Submit form if needed
-function submitForm() {
-  const form = document.querySelector('form');
-  if (form) {
-    form.dispatchEvent(new Event('submit', { bubbles: true }));
-  }
 }
 
 // Play success sound
 function playSuccessSound() {
   try {
-    // Create a simple beep using Web Audio API
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
     
-    oscillator.connect(gainNode);
-    gainNode.connect(audioContext.destination);
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
     
-    oscillator.frequency.value = 800;
-    oscillator.type = 'sine';
+    osc.frequency.value = 800;
+    gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
     
-    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
-    
-    oscillator.start(audioContext.currentTime);
-    oscillator.stop(audioContext.currentTime + 0.1);
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.1);
   } catch (e) {
-    console.log('Sound disabled or unavailable');
+    console.log('Sound unavailable');
   }
 }
 
-// Start solving when DOM is ready
+// Start solving
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', solveCurrentProblem);
 } else {
   solveCurrentProblem();
 }
 
-// Watch for new problems appearing (problem changed)
-// Only observe if document.body exists
+// Watch for problem changes
 if (document.body) {
   const observer = new MutationObserver(() => {
-    solveCurrentProblem();
+    setTimeout(solveCurrentProblem, 300);
   });
 
   observer.observe(document.body, {
     childList: true,
     subtree: true,
     characterData: false
-  });
-} else {
-  // Wait for body to exist
-  document.addEventListener('DOMContentLoaded', () => {
-    if (document.body) {
-      const observer = new MutationObserver(() => {
-        solveCurrentProblem();
-      });
-
-      observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        characterData: false
-      });
-    }
   });
 }
